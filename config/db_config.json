@@ -1,7 +1,0 @@
-{
-    "server": "localhost",
-    "database": "master",
-    "username": "sa",
-    "password": "yourpassword",
-    "driver": "ODBC Driver 17 for SQL Server"
-}

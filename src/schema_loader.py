@@ -1,68 +1,99 @@
+"""
+表结构加载模块，负责从不同来源加载表结构
+"""
 import json
-from llama_index.core import SQLDatabase
-from sqlalchemy import MetaData
 import logging
+from src.logger import get_logger
 
-# 配置日志记录器
-logger = logging.getLogger('SchemaLoader')
-logger.setLevel(logging.INFO)  # 将默认级别从DEBUG改为INFO，减少调试输出
-formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+logger = get_logger('schema')
 
-# 创建控制台处理器
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
-
-# 添加文件处理器，将详细日志写入文件而不是控制台
-file_handler = logging.FileHandler('schema_loader.log')
-file_handler.setLevel(logging.DEBUG)  # 文件日志仍保持DEBUG级别
-file_handler.setFormatter(formatter)
-logger.addHandler(file_handler)
-
-def load_schema_from_json(json_path):
-    logger.info(f'开始从{json_path}加载表结构')
-    with open(json_path, 'r', encoding='utf-8') as f:
-        tables_data = json.load(f)
+def load_schema_from_json(file_path):
+    """从JSON文件加载表结构信息"""
+    logger.info(f"从{file_path}加载表结构")
     
-    logger.info(f'成功加载{len(tables_data)}个表的定义')
-    
-    schema_info = []
-    for table in tables_data:
-        # 添加表的基本信息
-        table_info = f"表名：{table['name']}\n表说明：{table.get('comment', '')}\n\n字段列表："
-        schema_info.append(table_info)
-        logger.debug(f'处理表: {table["name"]}, 字段数: {len(table.get("columns", []))}')
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            tables = json.load(f)
         
-        # 添加列信息
-        for column in table.get('columns', []):
-            col_type = f"{column['type']}"
-            if column.get('length'):
-                col_type += f"({column['length']})"
-            
-            col_info = f"- 字段名（{column['name']}）: {column.get('comment', '无说明')} \n  英文名称: {column['name']} \n  类型: {col_type} \n  允许空值: {'是' if column.get('nullable', True) else '否'}"
-            schema_info.append(col_info)
-            
-            # 将字段详细信息的日志级别改为DEBUG
-            # 这样在控制台(INFO级别)不会显示，但在日志文件中会保留
-            logger.debug(f'添加字段信息: {column["name"]} ({col_type})')
+        # 构建schema字符串
+        schema_lines = []
         
-        schema_info.append("\n")
-    
-    final_schema = "\n".join(schema_info)
-    logger.info(f'表结构加载完成，总长度: {len(final_schema)}')
-    return final_schema
+        for table in tables:
+            table_name = table.get('name', '')
+            table_comment = table.get('comment', '')
+            
+            # 添加表信息
+            schema_lines.append(f"表名：{table_name}")
+            if table_comment:
+                schema_lines.append(f"表说明：{table_comment}")
+            schema_lines.append("")
+            
+            # 添加字段信息
+            schema_lines.append("字段列表：")
+            for column in table.get('columns', []):
+                col_name = column.get('name', '')
+                col_type = column.get('type', '')
+                col_length = column.get('length', '')
+                col_comment = column.get('comment', '')
+                
+                # 构建字段类型
+                type_str = col_type
+                if col_length:
+                    type_str += f"({col_length})"
+                
+                # 添加字段行
+                field_line = f"- {col_name}: {col_comment} ({type_str})"
+                schema_lines.append(field_line)
+            
+            # 表之间添加空行
+            schema_lines.append("")
+            schema_lines.append("")
+            
+        logger.info(f"成功加载{len(tables)}个表的结构")
+        return "\n".join(schema_lines)
+        
+    except Exception as e:
+        logger.error(f"加载表结构失败: {str(e)}")
+        raise ValueError(f"加载表结构失败: {str(e)}")
 
-def load_schema(engine):
-    logger.info('开始从数据库加载表结构')
-    metadata = MetaData()
-    metadata.reflect(bind=engine)
+def load_schema_from_database(engine):
+    """从数据库直接加载表结构信息"""
+    from sqlalchemy import inspect
     
-    schema_info = []
-    for table in metadata.tables.values():
-        cols = [f"{col.name} ({col.type})" for col in table.columns]
-        schema_info.append(f"Table {table.name}: {', '.join(cols)}")
-        logger.debug(f'加载表: {table.name}, 字段数: {len(cols)}')
+    logger.info("从数据库加载表结构")
     
-    final_schema = "\n".join(schema_info)
-    logger.info(f'数据库表结构加载完成，共{len(metadata.tables)}张表')
-    return final_schema
+    try:
+        inspector = inspect(engine)
+        schema_lines = []
+        
+        # 获取所有表名
+        table_names = inspector.get_table_names()
+        
+        for table_name in table_names:
+            # 添加表信息
+            schema_lines.append(f"表名：{table_name}")
+            schema_lines.append("")
+            
+            # 获取表的列信息
+            columns = inspector.get_columns(table_name)
+            
+            # 添加字段信息
+            schema_lines.append("字段列表：")
+            for column in columns:
+                col_name = column.get('name', '')
+                col_type = str(column.get('type', ''))
+                
+                # 添加字段行
+                field_line = f"- {col_name}: ({col_type})"
+                schema_lines.append(field_line)
+            
+            # 表之间添加空行
+            schema_lines.append("")
+            schema_lines.append("")
+            
+        logger.info(f"成功从数据库加载{len(table_names)}个表的结构")
+        return "\n".join(schema_lines)
+        
+    except Exception as e:
+        logger.error(f"从数据库加载表结构失败: {str(e)}")
+        raise ValueError(f"从数据库加载表结构失败: {str(e)}")

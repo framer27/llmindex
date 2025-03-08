@@ -1,8 +1,4 @@
-database:
-  dialect: mssql+pyodbc
-  username: sa
-  password: 326498
-  host: 192.168.31.231
-  port: 1433
-  database: mes
-  driver: ODBC Driver 17 for SQL Server
+database: mes
+password: '326498'
+server: 192.168.31.231
+username: sa

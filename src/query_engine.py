@@ -14,9 +14,36 @@ import joblib
 import hashlib
 import time
 
+# 全局日志配置标志
+_LOGGING_CONFIGURED = False
+
 # 缓存版本 - 如果更改了代码逻辑，请增加此版本号以使缓存失效
 CACHE_VERSION = "1.0"
 CACHE_DIR = "cache"
+
+# 配置全局日志
+def setup_logging():
+    global _LOGGING_CONFIGURED
+    if _LOGGING_CONFIGURED:
+        return
+        
+    # 移除所有根日志处理器
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+        
+    # 设置根日志级别为INFO，只输出重要信息
+    root_logger.setLevel(logging.INFO)
+    
+    # 创建简洁的控制台处理器
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    root_logger.addHandler(handler)
+    
+    _LOGGING_CONFIGURED = True
+
+# 初始化日志
+setup_logging()
 
 # 全局数据库连接池
 _ENGINE_POOL = None
@@ -63,26 +90,10 @@ class QueryBot:
         # 加载数据库配置
         from src.database import load_db_config
         self.db_config = load_db_config()
-        # 确保db_password是字符串类型
         self.db_password = str(self.db_config['password']) if 'password' in self.db_config else ""
         
-        # 初始化日志配置
+        # 获取日志记录器但不添加新的处理器
         self.logger = logging.getLogger('QueryBot')
-        
-        # 防止重复添加处理器
-        if not self.logger.handlers:
-            self.logger.setLevel(logging.DEBUG)  # 修改为DEBUG级别以显示更多信息
-            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-            
-            # 创建文件处理器
-            file_handler = logging.FileHandler('query_logs.log')
-            file_handler.setFormatter(formatter)
-            self.logger.addHandler(file_handler)
-            
-            # 创建控制台处理器
-            console_handler = logging.StreamHandler()
-            console_handler.setFormatter(formatter)
-            self.logger.addHandler(console_handler)
         
         # 性能统计收集器
         self.performance_stats = {
@@ -90,7 +101,7 @@ class QueryBot:
             'queries': []
         }
 
-        # 设置全局嵌入模型为local
+        # 设置全局嵌入模型
         Settings.embed_model = 'local:BAAI/bge-small-en-v1.5'
         
         self.llm = DeepSeek(
@@ -98,7 +109,7 @@ class QueryBot:
             api_key=api_key
         )
         
-        # 精简的提示模板，减少token数量但增加清晰指导
+        # 精简的提示模板
         self.prompt_template = """
         你是SQL Server专家，请将以下自然语言问题转换为SQL查询语句。
 
@@ -124,8 +135,7 @@ class QueryBot:
             os.makedirs(CACHE_DIR)
             
         # 初始化连接池
-        # 注意: 这里仅创建池配置，实际连接会在首次使用时建立
-        self.logger.info("正在预先初始化数据库连接池配置...")
+        self.logger.info("正在初始化数据库连接...")
         _ = get_db_engine()
             
     def _get_cache_key(self, tables_data_path):
@@ -386,55 +396,32 @@ class QueryBot:
         return cleaned_sql
     
     def build_engine(self, engine=None, use_cache=True, force_rebuild=False, tables_data_path='data/tables.json'):
-        """
-        构建查询引擎
-        
-        参数:
-            engine: SQLAlchemy引擎，如果为None则使用连接池
-            use_cache: 是否使用缓存，默认为True
-            force_rebuild: 是否强制重建缓存，默认为False
-            tables_data_path: 表结构数据路径
-        """
+        """构建查询引擎"""
         self.logger.info('开始构建查询引擎')
         init_start_time = time.time()
         
         # 初始化性能统计
         perf_stats = {}
         
-        # 记录时间点 - 数据库连接
-        db_start_time = time.time()
         # 使用连接池而不是新建连接
         if engine is None:
             engine = get_db_engine()
-            self.logger.info('使用数据库连接池中的引擎')
         
         self.sql_database = SQLDatabase(engine=engine)
-        db_time = time.time() - db_start_time
-        self.logger.info(f'[性能] 创建SQLDatabase耗时: {db_time:.2f}秒')
-        perf_stats['create_db'] = db_time
         
         # 检查缓存
-        cache_check_start = time.time()
         cache_path = None
         if use_cache and not force_rebuild:
             cache_path = self._check_cache(tables_data_path)
-        cache_check_time = time.time() - cache_check_start
-        self.logger.info(f'[性能] 检查缓存耗时: {cache_check_time:.2f}秒')
-        perf_stats['check_cache'] = cache_check_time
         
         # 如果存在缓存且未强制重建，则尝试加载缓存
         cached_embeddings = None
         if cache_path and use_cache and not force_rebuild:
             # 加载缓存
-            cache_load_start = time.time()
             cache_data = self._load_cache(cache_path)
-            cache_load_time = time.time() - cache_load_start
-            self.logger.info(f'[性能] 加载缓存耗时: {cache_load_time:.2f}秒')
-            perf_stats['load_cache'] = cache_load_time
             
             if cache_data:
                 # 从缓存恢复数据
-                restore_start = time.time()
                 self.tables_data = cache_data['tables_data']
                 self.schema = cache_data['schema']
                 
@@ -442,21 +429,9 @@ class QueryBot:
                 if 'table_embeddings' in cache_data:
                     cached_embeddings = cache_data['table_embeddings']
                     self.logger.info(f"从缓存加载了{len(cached_embeddings)}个表的嵌入向量")
-                restore_time = time.time() - restore_start
-                self.logger.info(f'[性能] 恢复缓存数据耗时: {restore_time:.2f}秒')
-                perf_stats['restore_data'] = restore_time
-                
-                # 记录一些缓存统计信息
-                self.logger.debug(f'缓存的表数量: {len(self.tables_data)}')
-                self.logger.debug(f'缓存的schema长度: {len(self.schema)}')
                 
                 # 创建查询引擎
-                engine_create_start = time.time()
                 engine_perf = self._create_query_engine(engine, cached_embeddings)
-                engine_create_time = time.time() - engine_create_start
-                self.logger.info(f'[性能] 创建查询引擎耗时: {engine_create_time:.2f}秒')
-                perf_stats['create_engine'] = engine_create_time
-                perf_stats['engine_details'] = engine_perf
                 
                 # 计算初始化时间
                 init_time = time.time() - init_start_time
@@ -464,69 +439,32 @@ class QueryBot:
                 perf_stats['total_time'] = init_time
                 perf_stats['from_cache'] = True
                 
-                # 输出详细的性能统计
-                self.logger.info("===== 性能统计摘要 =====")
-                self.logger.info(f"创建SQLDatabase: {db_time:.2f}秒")
-                self.logger.info(f"检查缓存: {cache_check_time:.2f}秒")
-                self.logger.info(f"加载缓存: {cache_load_time:.2f}秒")
-                self.logger.info(f"恢复缓存数据: {restore_time:.2f}秒")
-                self.logger.info(f"创建查询引擎: {engine_create_time:.2f}秒")
-                self.logger.info(f"总耗时: {init_time:.2f}秒")
-                self.logger.info("========================")
-                
                 # 保存性能统计
                 self.performance_stats['initialization'] = perf_stats
                 
                 return self
         
         # 如果没有缓存或强制重建，则重新构建查询引擎
-        self.logger.info('开始从头构建查询引擎')
+        self.logger.info('从头构建查询引擎')
         
         # 从tables.json加载表结构
-        load_schema_start = time.time()
         from src.schema_loader import load_schema_from_json
         with open(tables_data_path, 'r', encoding='utf-8') as f:
             self.tables_data = json.load(f)
         self.schema = load_schema_from_json(tables_data_path)
-        load_schema_time = time.time() - load_schema_start
-        self.logger.info(f'[性能] 加载表结构耗时: {load_schema_time:.2f}秒')
-        self.logger.debug(f'加载的schema长度: {len(self.schema)}')
-        perf_stats['load_schema'] = load_schema_time
         
         # 创建查询引擎
-        engine_create_start = time.time()
         engine_perf = self._create_query_engine(engine)
-        engine_create_time = time.time() - engine_create_start
-        self.logger.info(f'[性能] 创建查询引擎耗时: {engine_create_time:.2f}秒')
-        perf_stats['create_engine'] = engine_create_time
-        perf_stats['engine_details'] = engine_perf
         
         # 保存缓存
-        cache_save_start = time.time()
         if use_cache:
             self._save_cache(None, tables_data_path)
-        cache_save_time = time.time() - cache_save_start
-        self.logger.info(f'[性能] 保存缓存耗时: {cache_save_time:.2f}秒')
-        perf_stats['save_cache'] = cache_save_time
-        
-        # 记录调试信息
-        self.logger.debug(f'LLM模型: {self.llm.__class__.__name__}')
         
         # 计算总初始化时间
         init_time = time.time() - init_start_time
-        self.logger.info(f'查询引擎从头构建完成，总耗时: {init_time:.2f}秒')
+        self.logger.info(f'查询引擎构建完成，总耗时: {init_time:.2f}秒')
         perf_stats['total_time'] = init_time
         perf_stats['from_cache'] = False
-        
-        # 输出详细的性能统计
-        self.logger.info("===== 性能统计摘要 =====")
-        self.logger.info(f"创建SQLDatabase: {db_time:.2f}秒")
-        self.logger.info(f"检查缓存: {cache_check_time:.2f}秒")
-        self.logger.info(f"加载表结构: {load_schema_time:.2f}秒")
-        self.logger.info(f"创建查询引擎: {engine_create_time:.2f}秒")
-        self.logger.info(f"保存缓存: {cache_save_time:.2f}秒")
-        self.logger.info(f"总耗时: {init_time:.2f}秒")
-        self.logger.info("========================")
         
         # 保存性能统计
         self.performance_stats['initialization'] = perf_stats
